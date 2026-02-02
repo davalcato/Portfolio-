@@ -7,20 +7,19 @@ import yfinance as yf
 # =========================
 STARTING_CASH = 272.0
 cash = STARTING_CASH
-positions = {}
-trade_log = []
 
 HIST_DAYS = 90
 FORECAST_DAYS = 60
 MC_SIMULATIONS = 800
 
-LOOKBACK = 20
-
-BUY_Z = -1.0     # buy when price is statistically cheap
-SELL_Z = 1.0     # sell when price is statistically expensive
-EXIT_Z = 0.2
+LOOKBACK = 30          # signal window
+LOW_PCTL = 20          # buy zone
+HIGH_PCTL = 80         # sell zone
 
 TRANSACTION_COST = 0.001  # 10 bps
+
+positions = {}
+trade_log = []
 
 # =========================
 # LOAD TICKERS
@@ -30,7 +29,7 @@ try:
 except FileNotFoundError:
     tickers = [
         "BURU","CRBP","KITT","SRRK","RIO","LMND","RKLB","OKLO",
-        "DRUG","SOXL","RGTI","FJET","IBIO","RR"
+        "DRUG","SOXL","RGTI","FJET","IBIO","RR","AYB.BE"
     ]
 
 print("\nLoaded tickers:", tickers)
@@ -47,70 +46,64 @@ data = yf.download(
 )
 
 # =========================
-# MONTE CARLO
+# MONTE CARLO (LOG-NORMAL, NO NEGATIVE PRICES)
 # =========================
 def monte_carlo_paths(series, days, sims):
-    returns = series.pct_change().dropna()
-
-    mu = returns.mean()
-    sigma = returns.std()
+    log_returns = np.log(series / series.shift(1)).dropna()
+    mu = log_returns.mean()
+    sigma = log_returns.std()
 
     shocks = np.random.normal(mu, sigma, (days, sims))
+
     paths = np.zeros((days, sims))
-    paths[0] = series.iloc[-1] * (1 + shocks[0])
+    paths[0] = series.iloc[-1] * np.exp(shocks[0])
 
     for i in range(1, days):
-        paths[i] = paths[i - 1] * (1 + shocks[i])
+        paths[i] = paths[i - 1] * np.exp(shocks[i])
 
     return pd.DataFrame(paths)
 
 # =========================
-# SIGNAL ENGINE (FIXED)
+# SIGNAL ENGINE (PERCENTILE BASED)
 # =========================
-def signal_engine(prices, position):
-    if len(prices) < LOOKBACK:
+def signal_engine(price_series, position):
+    if len(price_series) < LOOKBACK:
         return "HOLD"
 
-    window = prices.iloc[-LOOKBACK:]
-    mean_price = window.mean()
-    std_price = window.std()
+    window = price_series.iloc[-LOOKBACK:]
+    current_price = window.iloc[-1]
 
-    if std_price == 0 or np.isnan(std_price):
-        return "HOLD"
+    p_low = np.percentile(window, LOW_PCTL)
+    p_high = np.percentile(window, HIGH_PCTL)
 
-    z = (prices.iloc[-1] - mean_price) / std_price
-
-    if z < BUY_Z and position == 0:
+    # BUY: statistically cheap
+    if current_price <= p_low and position == 0:
         return "BUY"
 
-    if z > SELL_Z and position > 0:
+    # SELL: statistically expensive
+    if current_price >= p_high and position > 0:
         return "SELL"
 
-    if abs(z) < EXIT_Z and position > 0:
+    # Forced exit to avoid infinite holds
+    if position > 0:
         return "SELL"
 
     return "HOLD"
 
 # =========================
-# BUILD PRICE SERIES
+# BUILD PRICE STRUCTURES
 # =========================
-extended_prices = {}
+historical_prices = {}
+forecast_prices = {}
 
 for t in tickers:
     try:
         close = data[t]["Close"].dropna()
+        historical_prices[t] = close
+        positions[t] = 0
 
         mc = monte_carlo_paths(close, FORECAST_DAYS, MC_SIMULATIONS)
-        forecast = mc.mean(axis=1)
-
-        future_dates = pd.bdate_range(
-            start=close.index[-1] + pd.Timedelta(days=1),
-            periods=FORECAST_DAYS
-        )
-        forecast.index = future_dates
-
-        extended_prices[t] = pd.concat([close, forecast])
-        positions[t] = 0
+        forecast_prices[t] = mc.mean(axis=1)
 
     except Exception as e:
         print(f"Skipping {t}: {e}")
@@ -118,21 +111,28 @@ for t in tickers:
 # =========================
 # SIMULATION LOOP
 # =========================
-total_days = len(next(iter(extended_prices.values())))
 peak_equity = STARTING_CASH
+total_days = HIST_DAYS + FORECAST_DAYS
 
 for day in range(total_days):
-    date = next(iter(extended_prices.values())).index[day]
-    label = "FORECAST" if day >= HIST_DAYS else "HIST"
-
-    print(f"\n=== {label} DAY {day+1} ({date.date()}) ===")
+    label = "HIST" if day < HIST_DAYS else "FORECAST"
+    print(f"\n=== {label} DAY {day + 1} ===")
 
     for t in tickers:
-        series = extended_prices[t].iloc[:day + 1]
-        price = series.iloc[-1]
-        position = positions[t]
+        hist_series = historical_prices[t]
 
-        signal = signal_engine(series, position)
+        # Clamp signal data to historical only
+        signal_series = hist_series.iloc[:min(day + 1, HIST_DAYS)]
+
+        # Price used for execution
+        if day < HIST_DAYS:
+            price = signal_series.iloc[-1]
+        else:
+            price = forecast_prices[t].iloc[day - HIST_DAYS]
+
+        position = positions[t]
+        signal = signal_engine(signal_series, position)
+
         print(f"{t}: price={price:.2f}, signal={signal}")
 
         # BUY
@@ -143,14 +143,22 @@ for day in range(total_days):
                 cash -= cost
                 positions[t] += qty
 
+                trade_log.append((t, "BUY", qty, price))
+
         # SELL
         elif signal == "SELL" and position > 0:
             proceeds = position * price * (1 - TRANSACTION_COST)
             cash += proceeds
             positions[t] = 0
 
+            trade_log.append((t, "SELL", position, price))
+
     equity = cash + sum(
-        positions[t] * extended_prices[t].iloc[day]
+        positions[t] * (
+            historical_prices[t].iloc[-1]
+            if day < HIST_DAYS
+            else forecast_prices[t].iloc[day - HIST_DAYS]
+        )
         for t in tickers
     )
 
@@ -165,5 +173,9 @@ for day in range(total_days):
 # =========================
 print("\n--- FINAL PORTFOLIO ---")
 print("Cash:", round(cash, 2))
-print("Positions:", {k: v for k, v in positions.items() if v > 0})
+print("Open Positions:", {k: v for k, v in positions.items() if v > 0})
+
+print("\n--- TRADES ---")
+for trade in trade_log[-20:]:
+    print(trade)
 
