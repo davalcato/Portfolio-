@@ -1,24 +1,50 @@
-# Quant Trading Simulator
+# Quant Trading Simulation Framework
 
-A modular quantitative trading simulator written in Python, designed to
-demonstrate signal generation, portfolio accounting, and Monte Carlo-based
-price simulation.
+A modular, research-oriented trading simulation framework designed to demonstrate
+systematic strategy development, execution, and performance evaluation.
 
-This repository is structured to reflect professional quant research code
-rather than ad-hoc scripts.
+This project emphasizes clean architecture, reproducibility, and risk-aware
+portfolio management — aligned with professional quant research workflows.
 
-## Project Structure
-```text
-.
-├── src/
-│   ├── config.py           # Global simulation parameters
-│   ├── data_loader.py      # Market data ingestion
-│   ├── signals.py          # Buy / Sell / Hold logic
-│   ├── portfolio.py        # Position and PnL tracking
-│   ├── monte_carlo.py      # Stochastic price simulation
-│   └── run_simulation.py   # Main simulation entry point
-├── trade_simulator.py      # Legacy prototype
-├── portfolio_view.py       # Result visualization
-├── universe.csv            # Asset universe
-└── README.md
+---
+
+## Project Overview
+
+This system simulates a **systematic mean-reversion strategy** using rolling
+z-scores computed on historical price data. The framework is structured to
+separate concerns clearly:
+
+- Data ingestion
+- Signal generation
+- Portfolio execution
+- Risk management
+- Performance evaluation
+
+The goal is not alpha claims, but **demonstrating sound quantitative engineering
+principles**.
+
+---
+
+## Strategy Logic
+
+**Signal**
+- Rolling mean and standard deviation over a configurable lookback window
+- Z-score = (price − rolling mean) / rolling std
+- BUY when z-score < lower threshold
+- SELL when z-score > upper threshold
+
+**Execution & Risk**
+- Position sizing capped by max portfolio allocation
+- Transaction cost modeling (bps)
+- No leverage
+- Long-only baseline
+
+**Metrics**
+- Annualized Sharpe Ratio
+- Maximum Drawdown
+
+---
+
+## Repository Structure
+
 
