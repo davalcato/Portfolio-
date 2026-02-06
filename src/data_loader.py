@@ -1,35 +1,36 @@
-# =========================
-# src/data_loader.py
-# Data loading utilities
-# =========================
-
 import pandas as pd
+import yfinance as yf
 
-UNIVERSE_FILE = "universe.csv"  # repo root
 
-def load_universe_prices(total_days=None):
+def load_universe_prices():
     """
-    Load universe prices as a DataFrame
-    total_days: optional, number of business days to fetch
+    Load adjusted close prices for the ticker universe.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame indexed by date with tickers as columns.
     """
-    import pandas as pd
-    import yfinance as yf
 
-    try:
-        tickers = pd.read_csv("universe.csv")["Ticker"].dropna().tolist()
-    except FileNotFoundError:
-        tickers = ["BURU","CRBP","KITT","SRRK","RIO"]
+    # Load universe
+    universe = pd.read_csv("universe.csv")["Ticker"].dropna().tolist()
 
-    period = f"{total_days}d" if total_days is not None else "180d"
-
+    # Download price data
     data = yf.download(
-        tickers,
-        period=period,
+        universe,
+        period="1y",
         auto_adjust=True,
-        group_by="ticker",
         progress=False
     )
 
-    prices = pd.DataFrame({t: data[t]["Close"] for t in tickers})
+    # Handle single vs multi-ticker cases
+    if isinstance(data.columns, pd.MultiIndex):
+        prices = data["Close"]
+    else:
+        prices = data.to_frame(name=universe[0])
+
+    # Drop assets with insufficient data
+    prices = prices.dropna(axis=1, thresh=int(0.8 * len(prices)))
+
     return prices
 

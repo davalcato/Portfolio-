@@ -1,23 +1,16 @@
 import numpy as np
 
-def signal_engine(price_series, position, lookback, low_pctl, high_pctl):
-    if len(price_series) < lookback:
-        return "HOLD"
+def zscore_signal(series, buy_z, sell_z):
+mean = series.mean()
+std = series.std()
 
-    window = price_series.iloc[-lookback:]
-    current = window.iloc[-1]
+if std == 0:
+return "HOLD"
 
-    p_low = np.percentile(window, low_pctl)
-    p_high = np.percentile(window, high_pctl)
+z = (series.iloc[-1] - mean) / std
 
-    if current <= p_low and position == 0:
-        return "BUY"
-
-    if current >= p_high and position > 0:
-        return "SELL"
-
-    if position > 0:
-        return "SELL"
-
-    return "HOLD"
-
+if z < buy_z:
+return "BUY"
+elif z > sell_z:
+return "SELL"
+return "HOLD"
