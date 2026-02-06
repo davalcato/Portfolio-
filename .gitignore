@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Outputs / artifacts
+output/
+
+# Serialized / local config
+*.p
+*.pickle
+
+# Virtual environments
+venv/
+.env
+
