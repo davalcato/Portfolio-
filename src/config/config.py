@@ -3,7 +3,11 @@
 # =========================
 
 INITIAL_CAPITAL = 10_000
-RANDOM_SEED = 42
+RANDOM_SEED = None
+
+# Backtest period
+START_DATE = "2015-01-01"
+END_DATE = "2024-01-01"
 
 # Signal parameters
 LOOKBACK = 20
