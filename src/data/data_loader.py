@@ -3,128 +3,142 @@
 import os
 import pandas as pd
 import yfinance as yf
-from tqdm import tqdm
-
-# ---------------------------
-# Paths (robust, module-based)
-# ---------------------------
-# Data folder is the same folder as this file
-DATA_DIR = os.path.dirname(os.path.abspath(__file__))
-UNIVERSE_CSV = os.path.join(DATA_DIR, "universe.csv")
-PRICE_CACHE_CSV = os.path.join(DATA_DIR, "price_data.csv")
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-# ---------------------------
-# Load Universe
-# ---------------------------
-def load_universe():
+# --------------------------------------------------
+# Load Universe (ROBUST CSV HANDLING)
+# --------------------------------------------------
+def load_universe(path="universe.csv"):
     """
-    Load the master ticker universe from CSV.
+    Load ticker universe from CSV safely.
 
-    - Normalizes column names to lowercase
-    - Accepts 'ticker' or 'symbol'
-    - Removes duplicates
-    - Drops null or empty tickers
-    """
-    if not os.path.exists(UNIVERSE_CSV):
-        raise FileNotFoundError(
-            f"{UNIVERSE_CSV} not found. Please place your universe CSV in this folder."
-        )
-
-    df = pd.read_csv(UNIVERSE_CSV)
-
-    # Normalize column names
-    df.columns = df.columns.str.lower()
-
-    # Flexible column handling
-    if "ticker" not in df.columns:
-        if "symbol" in df.columns:
-            df = df.rename(columns={"symbol": "ticker"})
-        else:
-            raise KeyError("Universe CSV must contain a 'ticker' column")
-
-    # Clean data
-    df["ticker"] = df["ticker"].astype(str).str.upper().str.strip()
-    df = df.drop_duplicates(subset="ticker").reset_index(drop=True)
-    df = df[df["ticker"].notna() & (df["ticker"] != "")]
-
-    return df
-
-
-# ---------------------------
-# Load Price Data
-# ---------------------------
-def load_universe_prices(df_universe, start="2023-01-01", end=None, parallel=True):
-    """
-    Download adjusted close prices for tickers.
-
-    - Uses caching
-    - Handles delisted tickers
-    - Merges new downloads with existing cache
+    Supports:
+    - CSV with header (Ticker / Symbol)
+    - CSV with no header
+    - CSV with multiple columns
     """
 
-    tickers = df_universe["ticker"].tolist()
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"{path} not found")
 
-    # Load cache if exists
-    if os.path.exists(PRICE_CACHE_CSV):
-        print(f"Loading cached price data from {PRICE_CACHE_CSV}")
-        price_data = pd.read_csv(PRICE_CACHE_CSV, index_col=0, parse_dates=True)
-        missing_tickers = [t for t in tickers if t not in price_data.columns]
-    else:
-        price_data = pd.DataFrame()
-        missing_tickers = tickers
+    df = pd.read_csv(path)
 
-    if not missing_tickers:
-        return price_data
+    possible_cols = ["Ticker", "ticker", "Symbol", "symbol"]
 
-    print(f"Downloading {len(missing_tickers)} missing tickers (parallel={parallel})...")
+    ticker_col = None
+
+    for col in possible_cols:
+        if col in df.columns:
+            ticker_col = col
+            break
+
+    if ticker_col is None:
+        ticker_col = df.columns[0]
+
+    tickers = (
+        df[ticker_col]
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .unique()
+    )
+
+    return pd.DataFrame({"Ticker": tickers})
+
+
+# --------------------------------------------------
+# Safe ticker downloader
+# --------------------------------------------------
+def download_ticker_data(ticker, start, end):
 
     try:
-        yf_data = yf.download(
-            tickers=missing_tickers,
+        data = yf.download(
+            ticker,
             start=start,
             end=end,
-            group_by="ticker",
-            auto_adjust=True,
-            threads=parallel,
             progress=False,
+            auto_adjust=True,
         )
-    except Exception as e:
-        print("Error downloading price data:", e)
-        return price_data
 
-    adj_close = pd.DataFrame()
+        # Skip bad downloads
+        if data is None or data.empty:
+            return None
 
-    for t in missing_tickers:
-        try:
-            if isinstance(yf_data.columns, pd.MultiIndex):
-                if t in yf_data.columns.get_level_values(0):
-                    adj_close[t] = yf_data[t]["Close"]
-            else:
-                # Single ticker case
-                if "Close" in yf_data.columns:
-                    adj_close[t] = yf_data["Close"]
-        except Exception as e:
-            print(f"Ticker {t} failed download: {e}")
+        if "Close" not in data.columns:
+            return None
 
-    adj_close = adj_close.dropna(axis=1, how="all")
+        series = data["Close"]
 
-    # Merge with cache
-    if not price_data.empty:
-        price_data = pd.concat([price_data, adj_close], axis=1)
+        # Ensure we return a pandas Series
+        if not isinstance(series, pd.Series):
+            return None
+
+        return ticker, series
+
+    except Exception:
+        return None
+
+
+# --------------------------------------------------
+# Load price data for entire universe
+# --------------------------------------------------
+def load_universe_prices(df_universe, start, end, parallel=True):
+
+    tickers = df_universe["Ticker"].tolist()
+
+    price_data = {}
+
+    if parallel:
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+
+            futures = {
+                executor.submit(download_ticker_data, ticker, start, end): ticker
+                for ticker in tickers
+            }
+
+            for future in as_completed(futures):
+
+                result = future.result()
+
+                if result is None:
+                    continue
+
+                ticker, series = result
+
+                price_data[ticker] = series
+
     else:
-        price_data = adj_close
 
-    # Ensure sorted index
-    price_data = price_data.sort_index()
+        for ticker in tickers:
 
-    # Save cache
-    os.makedirs(DATA_DIR, exist_ok=True)
-    price_data.to_csv(PRICE_CACHE_CSV)
+            result = download_ticker_data(ticker, start, end)
 
-    failed = [t for t in tickers if t not in price_data.columns]
-    if failed:
-        print(f"Failed downloads: {failed}")
+            if result is None:
+                continue
 
-    return price_data
+            ticker, series = result
 
+            price_data[ticker] = series
+
+    # --------------------------------------------------
+    # Handle case where no tickers downloaded
+    # --------------------------------------------------
+
+    if not price_data:
+        print("No valid price data downloaded.")
+        return pd.DataFrame()
+
+    print(f"Downloaded price series for {len(price_data)} tickers")
+
+    # --------------------------------------------------
+    # Correct way to build price matrix
+    # --------------------------------------------------
+
+    df = pd.concat(price_data, axis=1)
+
+    df.columns = price_data.keys()
+
+    return df.dropna(axis=1, how="all")
